@@ -1,2 +1,203 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+cols = [
+    "age","workclass","fnlwgt","education","education-num","marital-status","occupation",
+    "relationship","race","sex","capital-gain","capital-loss","hours-per-week",
+    "native-country","income"
+]
+df = pd.read_csv('adult.data', names=cols, sep=',', na_values=["?", " ?"], header=None, skipinitialspace=True)
+df.head()
+print("shape", df.shape)
+
+# df.info()
+df.describe(include='all').T
+
+# print(df.head())
+# counts = (df == ' ?').sum()
+# 1. Remove data with missing values
+print(df.isna().sum())
+print(df[df.isna().any(axis=1)])
+df_clean = df.dropna().reset_index(drop=True)
+
+# df_clean = df.drop(['capital-gain', 'capital-loss'], axis=1)
+# print('After droping missing: \n', df_clean)
+d_value = df_clean.duplicated(keep=False)
+df_clean.drop_duplicates(keep='first')
+print('After droping missing: \n', df_clean)
+print(df.shape)
+
+ 
+# num_cols = ["age","fnlwgt","hours-per-week","education-num"]
+df_clean['income_bin'] = df_clean['income'].apply(
+    lambda x: 1 if str(x).strip() in ([">50K", ">50K."]) else 0
+)
+
+
+# print(cat_cols)
+# print(num_cols)
+cat_cols = df_clean.select_dtypes(include=['object']).columns.tolist()
+
+
+# num_cols = df_clean.select_dtypes(include=['int64', 'float64']).columns.tolist()
+num_cols = ["age", "fnlwgt", "education-num", "capital-gain", "capital-loss", "hours-per-week"]
+cat_cols.remove('income') # removing original target
+print(cat_cols)
+print(num_cols)
+ 
+# 2. Remove outliers method (IQR)
+df_no_outliers = df_clean.copy()
+def remove_outliers_iqr(df, col):
+    Q1 = df[col].quantile(0.25)
+    Q3 = df[col].quantile(0.75)
+    IQR = Q3 - Q1
+    lower = Q1 - 1.5 * IQR
+    upper = Q3 + 1.5 * IQR
+    return df[(df[col] >= lower) & (df[col] <= upper)]
+
+for c in num_cols:
+    before = df_no_outliers.shape[0]
+    df_no_outliers = remove_outliers_iqr(df_no_outliers, c)
+    after = df_no_outliers.shape[0]
+    print(f"Removed outliers in {c}: {before - after} rows")
+    print("Shape after outlier removal: ", df_no_outliers.shape)
+
+# Prepare data for classification and regression
+from sklearn.model_selection import train_test_split
+df_model = df_no_outliers.copy()
+
+# print(df_model[num_cols])
+X = df_model.drop(columns=['income', 'income_bin'])
+y = df_model['income_bin']
+X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.25, random_state=42)
+
+# 3. Establish the importance of the weekly working hours on earning potential
+from scipy import stats
+plt.figure(figsize = (8, 6))
+sns.boxplot(x='income', y="hours-per-week", data=df_no_outliers)
+plt.title('Hours per week by income group: ')
+plt.show()
+means = df_no_outliers.groupby('income')['hours-per-week'].mean()
+medians = df_no_outliers.groupby('income')['hours-per-week'].median()
+
+# print('Mean hours per weak: \n', means)
+# print('Median hours per weak: \n', medians)
+high_income = df_no_outliers[df_no_outliers['income_bin'] == 1]['hours-per-week']
+low_income = df_no_outliers[df_no_outliers['income_bin'] == 0]['hours-per-week']
+
+
+# print(high_income)
+# print(low_income)
+# print(df_no_outliers.head())
+tstat, pval = stats.ttest_ind(high_income, low_income, equal_var = False)
+print("t-stat:  ", tstat, "p-value: ", pval)
+
+ 
+#4. find features highly correlated/important for earning potential
+from sklearn.ensemble import RandomForestClassifier
+
+ 
+# Numberic correlation
+corr_with_target = X.select_dtypes(include=[np.number]).assign(income=y).corr()['income'].sort_values(ascending=False)
+print("Numberic correlation with income: \n", corr_with_target)
+
+
+# corr_sorted = corr_with_target.sort_values(ascending=False)
+plt.figure(figsize=(6, 3))
+sns.barplot(x=corr_with_target.values, y=corr_with_target.index, palette="coolwarm", hue=corr_with_target.values, dodge=False, legend=False)
+plt.xlim(-1, 1)  # correlation range
+plt.xlabel("Correlation with income")
+plt.ylabel("Feature")
+plt.title("Feature Correlations with Income")
+plt.tight_layout()
+plt.show()
+ 
+
+# 5. Find the relation between the number of years spent to get the degree and earning potential
+# group by education-num
+edu_vs_income = df_no_outliers.groupby('education-num')['income_bin'].agg(['count', 'mean']).rename(columns={'mean':'pct_above_50k'})
+edu_vs_income = edu_vs_income.reset_index()
+plt.figure(figsize=(8, 5))
+sns.lineplot(data=edu_vs_income, x='education-num', y='pct_above_50k', marker='o')
+plt.title("Proportion earning >50k by education-num (years)")
+plt.ylabel("proportion >50k")
+plt.xlabel("education-num (years)")
+plt.grid(True)
+plt.show()
+edu_vs_income.head()
+
+ 
+# 6. Find the relationship between age and earning potential
+# create age bins
+df_no_outliers['age_bin'] = pd.cut(df_no_outliers['age'], bins=[16, 25, 35, 45, 55, 65, 90], 
+                                   labels=['16-25', '26-35', '36-45', '46-55', '56-65', '66+'])
+age_tab = df_no_outliers.groupby('age_bin')['income_bin'].agg(['count', 'mean']).rename(columns={'mean':'pct_above_50k'})
+age_tab = age_tab.reset_index()
+plt.figure(figsize=(8, 5))
+sns.barplot(data=age_tab, x='age_bin', y='pct_above_50k')
+plt.title("proportion: >50k by Age group")
+plt.ylabel("Probablity >50k")
+plt.xlabel("Age group")
+plt.show()
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
+
+
+# Preprocessors
+numeric_transformer = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median"))
+])
+categorical_transformer = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("encoder", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
+])
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("num", numeric_transformer, num_cols),
+        ("cat", categorical_transformer, cat_cols)
+    ],
+    remainder="drop"  # or "passthrough" if you want to keep untouched columns
+)
+
+ 
+
+# Final pipeline: preprocessing + model
+log_pipe = Pipeline(steps=[
+    ("preprocess", preprocessor),
+    ("clf", LogisticRegression(max_iter=1000))
+])
+lin_pipe = Pipeline(steps=[
+    ("preprocess", preprocessor),
+    ("clf", LinearRegression())
+])
+svm_model = Pipeline(steps=[
+    ("preprocess", preprocessor),
+    ("clf", SVC(kernel="rbf", C=1.0))
+])
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, mean_squared_error
+
+ 
+# LogisticRegression(max_iter=1000)
+log_pipe.fit(X_train, y_train)
+y_pred_log = log_pipe.predict(X_test)
+print('\nLogistic Regression Accuracy: ', accuracy_score(y_test, y_pred_log))
+print('\nClassification Report: \n', classification_report(y_test, y_pred_log))
+print('\nConfusion matrix: \n', confusion_matrix(y_test, y_pred_log))
+
+ 
+# LinearRegression
+lin_pipe.fit(X_train, y_train)
+y_pred_lin = lin_pipe.predict(X_test)
+# y_pred_prob = lin_pipe.predict_proba(X_test)[:,1]
+# print('\nLinear Regression Accuracy: ', accuracy_score(y_test, y_pred_lin))
+# print('\nMSE: \n', mean_squared_error(y_test, y_pred_lin))
+# print('\nConfusion matrix: \n', confusion_matrix(y_test, y_pred_lin))
+# print("Linear prediction probablity : ", y_pred_prob)
+
+svm_model.fit(X_train, y_train)
+print("\nSVM Classification Score:", svm_model.score(X_train, y_train))
